@@ -1,29 +1,20 @@
 package io.github.pauljamescleary.petstore.repository
 
+import cats._
+import cats.data._
+import cats.implicits._
+import doobie._
+import doobie.implicits._
 import io.github.pauljamescleary.petstore.model._
-import doobie._, doobie.implicits._
-import cats._, cats.data._, cats.implicits._
 
-class DoobiePetRepositoryInterpreter[F[_]: Monad](val xa: Transactor[F])
-    extends PetRepositoryAlgebra[F] {
+class DoobiePetRepositoryInterpreter[F[_] : Monad](val xa: Transactor[F])
+  extends PetRepositoryAlgebra[F] {
 
   // This will clear the database.  Note, this would typically be done via something like FLYWAY (TODO)
-  private val dropPetTable = sql"""
-    DROP TABLE IF EXISTS PET
-  """.update.run.transact(xa)
+  private val dropPetTable = dropPetDBTable(xa)
 
   // The tags column is controversial, could be a lookup table.  For our purposes, indexing on tags to allow searching is fine
-  private val createPetTable = sql"""
-    CREATE TABLE PET (
-      ID   SERIAL,
-      NAME VARCHAR NOT NULL,
-      CATEGORY VARCHAR NOT NULL,
-      BIO  VARCHAR NOT NULL,
-      STATUS VARCHAR NOT NULL,
-      PHOTO_URLS VARCHAR NOT NULL,
-      TAGS VARCHAR NOT NULL
-    )
-  """.update.run.transact(xa)
+  private val createPetTable = createPetDBTable(xa)
 
   /* We require type StatusMeta to handle our ADT Status */
   private implicit val StatusMeta: Meta[PetStatus] =
@@ -33,59 +24,96 @@ class DoobiePetRepositoryInterpreter[F[_]: Monad](val xa: Transactor[F])
   private implicit val SetStringMeta: Meta[Set[String]] = Meta[String]
     .xmap(str => str.split(',').toSet, strSet => strSet.mkString(","))
 
-  def migrate: F[Int] =
+  def migrate: F[Int] = {
     dropPetTable >> createPetTable
+  }
 
-  def put(pet: Pet): F[Pet] = {
+  override def put(pet: Pet): F[Pet] = {
+    val f: Fragment = f = sql"""REPLACE INTO PET (NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS) values (${pet.name}, ${pet.category}, ${pet.bio}, ${pet.status}, ${pet.photoUrls}, ${pet.tags})"""
+
     val insert: ConnectionIO[Pet] =
       for {
-        id <- sql"REPLACE INTO PET (NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS) values (${pet.name}, ${pet.category}, ${pet.bio}, ${pet.status}, ${pet.photoUrls}, ${pet.tags})".update
-          .withUniqueGeneratedKeys[Long]("ID")
+        id <- f.update.withUniqueGeneratedKeys[Long]("ID")
       } yield pet.copy(id = Some(id))
+
     insert.transact(xa)
   }
 
-  def get(id: Long): F[Option[Pet]] =
-    sql"""
+  override def get(id: Long): F[Option[Pet]] = {
+    val f: Fragment =
+      sql"""
       SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
         FROM PET
        WHERE ID = $id
-     """.query[Pet].option.transact(xa)
+     """
+    f.query[Pet].option.transact(xa)
+  }
 
-  def delete(id: Long): F[Option[Pet]] =
+  override def delete(id: Long): F[Option[Pet]] = {
     get(id).flatMap {
       case Some(pet) =>
-        sql"DELETE FROM PET WHERE ID = $id".update.run
+        val f: Fragment = sql"DELETE FROM PET WHERE ID = $id"
+        f.update.run
           .transact(xa)
           .map(_ => Some(pet))
       case None =>
         none[Pet].pure[F]
     }
+  }
 
-  def findByNameAndCategory(name: String, category: String): F[Set[Pet]] =
-    sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
+  override def findByNameAndCategory(name: String, category: String): F[Set[Pet]] = {
+    val f: Fragment =
+      sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
             FROM PET
            WHERE NAME = $name AND CATEGORY = $category
-           """.query[Pet].list.transact(xa).map(_.toSet)
+           """
+    f.query[Pet].list.transact(xa).map(_.toSet)
+  }
 
-  def list(pageSize: Int, offset: Int): F[List[Pet]] =
-    sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
+  override def list(pageSize: Int, offset: Int): F[List[Pet]] = {
+    val f: Fragment =
+      sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
             FROM PET
             ORDER BY NAME LIMIT $offset,$pageSize"""
-      .query[Pet]
+
+    f.query[Pet]
       .list
       .transact(xa)
+  }
 
   override def findByStatus(statuses: NonEmptyList[PetStatus]): F[List[Pet]] = {
-    val q = sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID
-            FROM PET
-           WHERE """ ++ Fragments.in(fr"STATUS", statuses)
+    val f1: Fragment = sql"""SELECT NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS, ID FROM PET WHERE """
+
+    val q = f1 ++ Fragments.in(fr"STATUS", statuses)
 
     q.query[Pet].list.transact(xa)
+  }
+
+  private def createPetDBTable(xa: Transactor[F]): F[Int] = {
+    val f: Fragment =
+      sql"""
+    CREATE TABLE PET (
+      ID   SERIAL,
+      NAME VARCHAR NOT NULL,
+      CATEGORY VARCHAR NOT NULL,
+      BIO  VARCHAR NOT NULL,
+      STATUS VARCHAR NOT NULL,
+      PHOTO_URLS VARCHAR NOT NULL,
+      TAGS VARCHAR NOT NULL
+    )
+  """
+    f.update.run.transact(xa)
+  }
+
+  private def dropPetDBTable(xa: Transactor[F]): F[Int] = {
+    val f: Fragment = sql"""DROP TABLE IF EXISTS PET"""
+    f.update.run.transact(xa)
   }
 }
 
 object DoobiePetRepositoryInterpreter {
-  def apply[F[_]: Monad](xa: Transactor[F]): DoobiePetRepositoryInterpreter[F] =
+  def apply[F[_] : Monad](
+                           xa: Transactor[F]): DoobiePetRepositoryInterpreter[F] = {
     new DoobiePetRepositoryInterpreter(xa)
+  }
 }
