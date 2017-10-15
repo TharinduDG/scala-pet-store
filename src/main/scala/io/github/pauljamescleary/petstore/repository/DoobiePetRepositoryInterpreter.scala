@@ -29,7 +29,7 @@ class DoobiePetRepositoryInterpreter[F[_] : Monad](val xa: Transactor[F])
   }
 
   override def put(pet: Pet): F[Pet] = {
-    val f: Fragment = f = sql"""REPLACE INTO PET (NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS) values (${pet.name}, ${pet.category}, ${pet.bio}, ${pet.status}, ${pet.photoUrls}, ${pet.tags})"""
+    val f: Fragment = sql"""REPLACE INTO PET (NAME, CATEGORY, BIO, STATUS, TAGS, PHOTO_URLS) values (${pet.name}, ${pet.category}, ${pet.bio}, ${pet.status}, ${pet.photoUrls}, ${pet.tags})"""
 
     val insert: ConnectionIO[Pet] =
       for {
